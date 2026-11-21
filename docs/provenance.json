@@ -1,0 +1,16 @@
+{
+  "conversion_allocation": "One credited (conversion_id, conversion_timestamp) key globally; prefer latest observed clicked credited impression, otherwise latest observed credited impression. Ties: campaign ID then source row.",
+  "cost_currency": null,
+  "cost_scale": 1000000000000,
+  "coverage": "Full pinned release; no additional row sampling by this project. Criteo already subsampled the original traffic.",
+  "dataset": "Criteo Attribution Modeling for Bidding Dataset",
+  "documentation_url": "https://ailab.criteo.com/criteo-attribution-modeling-bidding-dataset/",
+  "license": "CC-BY-NC-SA-4.0",
+  "published_grain": "relative_day \u00d7 campaign_id",
+  "revenue_available": false,
+  "source_bytes": 653015824,
+  "source_revision": "904188a63cbad78bee43cd26ff5ee4ac77903986",
+  "source_sha256": "94ac7a465564349bc7ba008602211d5990a3c53cc133abc0aadef61ea2391a98",
+  "source_url": "https://huggingface.co/datasets/criteo/criteo-attribution-dataset/resolve/904188a63cbad78bee43cd26ff5ee4ac77903986/criteo_attribution_dataset.tsv.gz",
+  "time_basis": "Floor of relative impression timestamp / 86400; no calendar dates supplied."
+}

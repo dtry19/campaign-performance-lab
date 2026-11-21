@@ -1,48 +1,35 @@
 {
-  "quality": {
-    "source_rows": 3249,
-    "accepted_rows": 3240,
-    "quarantined_rows": 9,
-    "reasons": {
-      "duplicate grain": 3,
-      "negative metric": 1,
-      "invalid click-attributed funnel": 2,
-      "invalid dimension": 1,
-      "Invalid isoformat string: 'invalid'": 1,
-      "invalid literal for int() with base 10: 'bad'": 1
-    }
+  "overall": {
+    "clicks": 5947563,
+    "conversions": 237157,
+    "cpa_transformed": 0.020363474580320323,
+    "ctr": 0.3611582006757701,
+    "impressions": 16468027,
+    "post_click_conversions": 237157,
+    "post_click_cvr": 0.039874651180660046,
+    "transformed_cost": 4829.340541045027
   },
-  "channels": [
-    {
-      "channel": "Mobile Web",
-      "spend": 224980.01,
-      "revenue": 1660643.01,
-      "ctr": 0.011785309483228895,
-      "cvr": 0.05491050213844448,
-      "cpa": 10.816866676282514,
-      "roas": 7.381291386732537
-    },
-    {
-      "channel": "Display",
-      "spend": 195277.66999999998,
-      "revenue": 1091634.17,
-      "ctr": 0.01193755330101587,
-      "cvr": 0.035148498287102696,
-      "cpa": 14.29977079671939,
-      "roas": 5.590163842081893
-    },
-    {
-      "channel": "Online Video",
-      "spend": 327286.12,
-      "revenue": 538571.68,
-      "ctr": 0.012052359568441216,
-      "cvr": 0.017178044755195115,
-      "cpa": 48.30078512396694,
-      "roas": 1.6455683485752468
-    }
-  ],
-  "scenario": {
-    "shift_dollars": 32728.61,
-    "illustrative_revenue_difference": 187722.24
+  "quality": {
+    "accepted_rows": 16468027,
+    "campaigns": 675,
+    "conversion_ids_with_multiple_timestamps": 2910,
+    "credited_conversion_impressions": 442424,
+    "credited_conversion_keys_linked_to_multiple_campaigns": 0,
+    "daily_campaign_rows": 20665,
+    "max_timestamp": 2671199,
+    "min_timestamp": 0,
+    "observed_days": 31,
+    "out_of_order_timestamps": 0,
+    "post_click_conversions": 237157,
+    "quarantined_rows": 0,
+    "reasons": {},
+    "repeated_credited_conversion_links_collapsed": 205267,
+    "source_rows": 16468027,
+    "total_clicks": 5947563,
+    "total_cost_scaled": 4829340541045027,
+    "unique_credited_conversion_ids": 236331,
+    "unique_credited_conversions": 237157,
+    "unique_observed_conversion_ids": 435810,
+    "unique_observed_conversion_keys": 438730
   }
 }

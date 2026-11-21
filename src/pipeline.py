@@ -1,133 +1,250 @@
-"""Deterministic synthetic campaign reporting; Python standard library only."""
+"""Real Criteo campaign reporting, with an offline aggregate rebuild path."""
 from __future__ import annotations
 import argparse
 import csv
-import datetime as dt
+import gzip
 import json
-import random
 import sqlite3
 from collections import Counter
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
+from fetch_data import REVISION, SHA256, URL, digest
 
 ROOT = Path(__file__).resolve().parents[1]
-FIELDS = ['date','campaign','channel','region','impressions','clicks','conversions','spend_cents','revenue_cents']
-NUMERIC = FIELDS[4:]
-CHANNELS = ['Display','Online Video','Mobile Web']
-REGIONS = ['West','Central','East']
+DERIVED = ROOT / 'data/derived'
+SCALE = 10**12
+FIELDS = ['day','campaign','impressions','clicks','conversions','post_click_conversions','cost_scaled']
+REQUIRED = ['timestamp','campaign','conversion','conversion_timestamp','conversion_id','attribution','click','cost']
+SOURCE_PAGE = 'https://ailab.criteo.com/criteo-attribution-modeling-bidding-dataset/'
 
-def generate():
-    rng = random.Random(2027)
-    rows = []
-    for day in range(60):
-        for campaign in range(18):
-            channel = CHANNELS[campaign % 3]
-            for region in REGIONS:
-                impressions = rng.randint(18000, 42000)
-                clicks = int(impressions * rng.uniform(.006, .018))
-                # Designed heterogeneity, not an empirical advertising benchmark.
-                conversion_rate = [.035,.022,.055][campaign % 3]
-                if day >= 30 and channel == 'Online Video':
-                    conversion_rate *= .55
-                conversions = sum(rng.random() < conversion_rate for _ in range(clicks))
-                spend = round(impressions / 1000 * [6,10,7][campaign % 3] * 100)
-                revenue = conversions * rng.randint(6500,9500)
-                rows.append(dict(zip(FIELDS,[(dt.date(2026,9,1)+dt.timedelta(days=day)).isoformat(),f'C{campaign+1:02}',channel,region,impressions,clicks,conversions,spend,revenue])))
-    # Explicit fixtures exercise duplicate, missing dimension, funnel and spend checks.
-    for i in range(3):
-        rows.append(dict(rows[i]))
-    for i, updates in enumerate([{'spend_cents':-10},{'clicks':999999},{'region':''},{'conversions':999999},{'date':'invalid'},{'impressions':'bad'}]):
-        row = dict(rows[10+i]); row.update(updates); rows.append(row)
-    return rows
-
-def clean(rows):
-    accepted, rejected, seen = [], [], set()
-    for line, original in enumerate(rows,2):
-        row = dict(original)
-        reason = None
-        try:
-            dt.date.fromisoformat(row['date'])
-            if row['channel'] not in CHANNELS or row['region'] not in REGIONS or not row['campaign']:
-                raise ValueError('invalid dimension')
-            for key in NUMERIC:
-                row[key] = int(row[key])
-            if min(row[k] for k in NUMERIC) < 0:
-                raise ValueError('negative metric')
-            if not row['impressions'] >= row['clicks'] >= row['conversions']:
-                raise ValueError('invalid click-attributed funnel')
-            key = tuple(row[k] for k in FIELDS[:4])
-            if key in seen:
-                raise ValueError('duplicate grain')
-            seen.add(key)
-        except (ValueError, TypeError, KeyError) as exc:
-            reason = str(exc)
-        if reason:
-            rejected.append({'source_line':line,'reason':reason,'record':original})
-        else:
-            accepted.append(row)
-    return accepted,rejected
+def write_json(path, value):
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
 
 def write_csv(path, rows, fields=None):
-    with path.open('w',newline='') as f:
-        writer=csv.DictWriter(f,fieldnames=fields or list(rows[0]))
-        writer.writeheader(); writer.writerows(rows)
+    with path.open('w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=fields or list(rows[0]), lineterminator='\n')
+        w.writeheader()
+        w.writerows(rows)
+
+def ingest(records):
+    """Stream source rows; retain campaign/day totals and one allocation per sale.
+
+    Each (conversion ID, conversion timestamp) key is counted once globally. Prefer the most recent observed
+    clicked, credited impression; otherwise the most recent credited impression.
+    This is an explicit project allocation rule over subsampled data, not proof
+    of the platform's exact credited touchpoint. No user identifiers are retained.
+    """
+    groups, allocations, rejected = {}, {}, []
+    reasons = Counter()
+    source_rows = accepted = credited_impressions = nonmonotonic = 0
+    previous_timestamp = -1
+    observed_conversion_keys = set()
+    conversion_id_times = {}
+    reused_conversion_ids = set()
+    conflicting_campaign_ids = set()
+    min_timestamp, max_timestamp = None, None
+    for line, raw in enumerate(records, 2):
+        source_rows += 1
+        try:
+            if any(k not in raw for k in REQUIRED):
+                raise ValueError('missing_required_field')
+            values = {k: int(raw[k]) for k in REQUIRED if k != 'cost'}
+            cost = Decimal(raw['cost'])
+            if not cost.is_finite() or cost < 0:
+                raise ValueError('invalid_cost')
+            if values['timestamp'] < 0 or values['campaign'] < 0:
+                raise ValueError('invalid_dimension')
+            if any(values[k] not in (0, 1) for k in ['conversion','attribution','click']):
+                raise ValueError('nonbinary_flag')
+            if values['attribution'] > values['conversion']:
+                raise ValueError('attribution_without_conversion')
+            if values['conversion']:
+                if values['conversion_id'] < 0 or values['conversion_timestamp'] < values['timestamp']:
+                    raise ValueError('invalid_conversion_metadata')
+            elif values['conversion_id'] != -1 or values['conversion_timestamp'] != -1:
+                raise ValueError('unexpected_conversion_metadata')
+            cost_scaled = int((cost * SCALE).to_integral_value(rounding=ROUND_HALF_EVEN))
+        except (ValueError, TypeError, KeyError, InvalidOperation, OverflowError) as exc:
+            reason = str(exc) if str(exc) in {'missing_required_field','invalid_cost','invalid_dimension','nonbinary_flag','attribution_without_conversion','invalid_conversion_metadata','unexpected_conversion_metadata'} else 'malformed_value'
+            reasons[reason] += 1
+            # Record position/reason only; do not publish pseudonymous identifiers.
+            rejected.append({'source_line':line,'reason':reason})
+            continue
+        accepted += 1
+        timestamp = values['timestamp']
+        nonmonotonic += timestamp < previous_timestamp
+        previous_timestamp = timestamp
+        min_timestamp = timestamp if min_timestamp is None else min(min_timestamp, timestamp)
+        max_timestamp = timestamp if max_timestamp is None else max(max_timestamp, timestamp)
+        day, campaign = timestamp // 86400, str(values['campaign'])
+        key = day, campaign
+        if key not in groups:
+            groups[key] = dict(zip(FIELDS, [day,campaign,0,0,0,0,0]))
+        group = groups[key]
+        group['impressions'] += 1
+        group['clicks'] += values['click']
+        group['cost_scaled'] += cost_scaled
+        if values['conversion']:
+            cid, conversion_time = values['conversion_id'], values['conversion_timestamp']
+            observed_conversion_keys.add((cid, conversion_time))
+            first_time = conversion_id_times.setdefault(cid, conversion_time)
+            if first_time != conversion_time:
+                reused_conversion_ids.add(cid)
+        if values['attribution']:
+            credited_impressions += 1
+            cid = (values['conversion_id'], values['conversion_timestamp'])
+            # Deterministic ties: campaign ID, then source line. No per-user key.
+            candidate = (values['click'],timestamp,values['campaign'],line,day,campaign)
+            old = allocations.get(cid)
+            if old is not None and old[-1] != campaign:
+                conflicting_campaign_ids.add(cid)
+            if old is None or candidate > old:
+                allocations[cid] = candidate
+        if source_rows % 2_000_000 == 0:
+            print(f'Processed {source_rows:,} source impressions', flush=True)
+    for click, _, _, _, day, campaign in allocations.values():
+        groups[day,campaign]['conversions'] += 1
+        groups[day,campaign]['post_click_conversions'] += click
+    rows = [groups[k] for k in sorted(groups)]
+    quality = {
+        'source_rows': source_rows, 'accepted_rows': accepted,
+        'quarantined_rows': len(rejected), 'reasons': dict(reasons),
+        'daily_campaign_rows': len(rows), 'campaigns': len({r['campaign'] for r in rows}),
+        'observed_days': len({r['day'] for r in rows}),
+        'min_timestamp': min_timestamp, 'max_timestamp': max_timestamp,
+        'out_of_order_timestamps': nonmonotonic,
+        'unique_observed_conversion_ids': len(conversion_id_times),
+        'unique_observed_conversion_keys': len(observed_conversion_keys),
+        'conversion_ids_with_multiple_timestamps': len(reused_conversion_ids),
+        'unique_credited_conversion_ids': len({cid for cid, _ in allocations}),
+        'credited_conversion_impressions': credited_impressions,
+        'unique_credited_conversions': len(allocations),
+        'repeated_credited_conversion_links_collapsed': credited_impressions - len(allocations),
+        'credited_conversion_keys_linked_to_multiple_campaigns': len(conflicting_campaign_ids),
+        'total_cost_scaled': sum(r['cost_scaled'] for r in rows),
+        'total_clicks': sum(r['clicks'] for r in rows),
+        'post_click_conversions': sum(r['post_click_conversions'] for r in rows),
+    }
+    return rows, quality, rejected
+
+def import_source(source):
+    actual_hash = digest(source)
+    if actual_hash != SHA256:
+        raise ValueError('Source checksum mismatch; use the pinned Criteo release')
+    with gzip.open(source, 'rt', newline='') as f:
+        rows, quality, rejected = ingest(csv.DictReader(f, delimiter='\t'))
+    DERIVED.mkdir(parents=True, exist_ok=True)
+    write_csv(DERIVED/'campaign_daily.csv', rows, FIELDS)
+    write_json(DERIVED/'quality.json', quality)
+    write_json(DERIVED/'quarantine.json', rejected)
+    write_json(DERIVED/'provenance.json', {
+        'dataset': 'Criteo Attribution Modeling for Bidding Dataset',
+        'source_url': URL, 'documentation_url': SOURCE_PAGE,
+        'source_revision': REVISION, 'source_sha256': actual_hash,
+        'source_bytes': source.stat().st_size,
+        'coverage': 'Full pinned release; no additional row sampling by this project. Criteo already subsampled the original traffic.',
+        'license': 'CC-BY-NC-SA-4.0',
+        'cost_scale': SCALE, 'cost_currency': None, 'revenue_available': False,
+        'time_basis': 'Floor of relative impression timestamp / 86400; no calendar dates supplied.',
+        'conversion_allocation': 'One credited (conversion_id, conversion_timestamp) key globally; prefer latest observed clicked credited impression, otherwise latest observed credited impression. Ties: campaign ID then source row.',
+        'published_grain': 'relative_day × campaign_id',
+    })
+    print(json.dumps(quality, indent=2), flush=True)
+
+def load_derived():
+    with (DERIVED/'campaign_daily.csv').open(newline='') as f:
+        rows = [{k:(v if k == 'campaign' else int(v)) for k,v in r.items()} for r in csv.DictReader(f)]
+    return rows, json.loads((DERIVED/'quality.json').read_text()), json.loads((DERIVED/'provenance.json').read_text())
+
+def validate_derived(rows, quality):
+    if not rows:
+        raise ValueError('No campaign data')
+    keys = set()
+    for r in rows:
+        key = r['day'],r['campaign']
+        if key in keys:
+            raise ValueError('Duplicate campaign/day aggregate')
+        keys.add(key)
+        if min(r[k] for k in FIELDS if k != 'campaign') < 0:
+            raise ValueError('Negative aggregate')
+        if not r['post_click_conversions'] <= r['clicks'] <= r['impressions']:
+            raise ValueError('Invalid post-click funnel')
+        if not r['post_click_conversions'] <= r['conversions'] <= r['impressions']:
+            raise ValueError('Invalid credited-conversion aggregate')
+    checks = {'impressions':'accepted_rows','clicks':'total_clicks','conversions':'unique_credited_conversions','post_click_conversions':'post_click_conversions','cost_scaled':'total_cost_scaled'}
+    for field, expected in checks.items():
+        if sum(r[field] for r in rows) != quality[expected]:
+            raise ValueError(f'Aggregate reconciliation failed: {field}')
+    if quality['source_rows'] != quality['accepted_rows'] + quality['quarantined_rows']:
+        raise ValueError('Source accounting failed')
 
 def database(rows, path):
-    con=sqlite3.connect(path)
+    con = sqlite3.connect(path)
     con.execute('DROP TABLE IF EXISTS campaign_daily')
-    con.execute('CREATE TABLE campaign_daily (date TEXT, campaign TEXT, channel TEXT, region TEXT, impressions INTEGER, clicks INTEGER, conversions INTEGER, spend_cents INTEGER, revenue_cents INTEGER, PRIMARY KEY(date,campaign,channel,region))')
-    con.executemany('INSERT INTO campaign_daily VALUES (?,?,?,?,?,?,?,?,?)',[[r[k] for k in FIELDS] for r in rows])
+    con.execute('CREATE TABLE campaign_daily (day INTEGER, campaign TEXT, impressions INTEGER, clicks INTEGER, conversions INTEGER, post_click_conversions INTEGER, cost_scaled INTEGER, PRIMARY KEY(day,campaign))')
+    con.executemany('INSERT INTO campaign_daily VALUES (?,?,?,?,?,?,?)', [[r[k] for k in FIELDS] for r in rows])
     con.executescript((ROOT/'sql/metrics.sql').read_text())
-    con.commit(); con.row_factory=sqlite3.Row
+    con.commit()
+    con.row_factory = sqlite3.Row
     return con
 
 def run(output):
-    output.mkdir(parents=True,exist_ok=True)
-    raw=generate(); rows,rejected=clean(raw)
-    write_csv(output/'campaign_raw.csv',raw,FIELDS)
-    write_csv(output/'campaign_clean.csv',rows,FIELDS)
-    (output/'quarantine.json').write_text(json.dumps(rejected,indent=2)+'\n')
-    con=database(rows,output/'campaigns.sqlite')
-    campaign=[dict(r) for r in con.execute('SELECT * FROM campaign_kpis ORDER BY roas DESC')]
-    channels=[dict(r) for r in con.execute('SELECT * FROM channel_kpis ORDER BY roas DESC')]
-    write_csv(output/'campaign_kpis.csv',campaign)
-    quality={'source_rows':len(raw),'accepted_rows':len(rows),'quarantined_rows':len(rejected),'reasons':dict(Counter(r['reason'] for r in rejected))}
-    payload={'rows':rows,'quality':quality}
-    template=(ROOT/'src/dashboard.html').read_text()
-    (output/'index.html').write_text(template.replace('__PAYLOAD__',json.dumps(payload)))
-    (output/'quality.json').write_text(json.dumps(quality,indent=2)+'\n')
-    best,worst=channels[0],channels[-1]
-    shift=round(worst['spend']*.1,2)
-    # Fixed observed return per dollar, illustrative only; no causal interpretation.
-    scenario=round(shift*(best['roas']-worst['roas']),2)
-    period=[dict(r) for r in con.execute('SELECT * FROM period_kpis')]
-    write_csv(output/'period_kpis.csv',period)
-    memo=f'''# Synthetic client business review
+    rows, quality, provenance = load_derived()
+    validate_derived(rows, quality)
+    output.mkdir(parents=True, exist_ok=True)
+    con = database(rows, output/'campaigns.sqlite')
+    campaigns = [dict(r) for r in con.execute('SELECT * FROM campaign_kpis ORDER BY impressions DESC,campaign')]
+    daily = [dict(r) for r in con.execute('SELECT * FROM daily_kpis ORDER BY day')]
+    total = dict(con.execute('SELECT * FROM overall_kpis').fetchone())
+    write_csv(output/'campaign_daily.csv',rows,FIELDS)
+    write_csv(output/'campaign_kpis.csv',campaigns)
+    write_csv(output/'daily_kpis.csv',daily)
+    write_json(output/'quality.json',quality)
+    write_json(output/'provenance.json',provenance)
+    write_json(output/'quarantine.json',json.loads((DERIVED/'quarantine.json').read_text()))
+    write_json(output/'summary.json', {'quality':quality,'overall':total})
+    template = (ROOT/'src/dashboard.html').read_text()
+    payload = {'rows':rows,'quality':quality,'provenance':provenance}
+    (output/'index.html').write_text(template.replace('__PAYLOAD__', json.dumps(payload,separators=(',',':'))))
+    eligible = [r for r in campaigns if r['conversions'] >= 100 and r['clicks'] >= 100]
+    candidate = min(eligible, key=lambda r:r['cpa_transformed']) if eligible else None
+    comparison = (f"Among campaigns with at least 100 credited conversions and 100 clicks, campaign {candidate['campaign']} has the lowest observed CPA ({candidate['cpa_transformed']:.6f} transformed units). This volume gate is a review heuristic, not a significance test or evidence of incremental effectiveness." if candidate else 'No campaign meets the 100-conversion/100-click review gate.')
+    memo = f'''# Real-data campaign business review
 
-All results below come from a seeded simulation, not a T-Mobile campaign or client.
+## What the full release shows
+- {total['impressions']:,} observed impressions across {quality['campaigns']:,} campaigns and {quality['observed_days']} relative day bins.
+- {total['clicks']:,} clicks; weighted CTR: {total['ctr']:.2%}.
+- {total['conversions']:,} unique Criteo-credited conversion keys (ID + timestamp) after deduplication; {total['post_click_conversions']:,} have an observed clicked credited impression.
+- Post-click credited CVR: {total['post_click_cvr']:.2%}. CPA: {total['cpa_transformed']:.6f} transformed cost units per credited conversion.
+- {comparison}
 
-## Decision brief
-- Highest observed channel ROAS: {best['channel']} ({best['roas']:.2f}x); lowest: {worst['channel']} ({worst['roas']:.2f}x).
-- Investigate {worst['channel']} by campaign, region, creative and attribution lag before changing investment. The simulator deliberately introduces an Online Video conversion-rate decline after day 30; this is a test of detection, not a discovered real-world effect.
-- Consider a capped experiment reallocating 10% of {worst['channel']} spend (${shift:,.2f}) toward {best['channel']}, subject to inventory, marginal costs and measurement checks.
-- Holding observed average returns constant would imply ${scenario:,.2f} additional attributed revenue. This is scenario arithmetic, **not measured lift, incremental revenue, a forecast, or a causal estimate**.
+## Recommended conversation
+1. Ask Customer Success for the advertiser objective, target efficiency, attribution settings and actual cost/revenue exports before treating these comparisons as actionable client economics.
+2. Review the candidate campaign's targeting, bid strategy, product mix and coverage with Ad Operations. Campaign IDs are anonymous; different advertisers and objectives may be mixed, so cross-campaign CPA ranking is only a diagnostic shortlist.
+3. Confirm daily coverage and tracking; zero-conversion days produce undefined CPA rather than a misleading zero. Historical subsampled data is not a current performance benchmark.
+4. Propose an advertiser-specific, capped experiment only after comparable objectives and measurement are established. No spend shift, dollar return, realized lift, renewal, or upsell result is claimed.
 
-## Reporting integrity
-{len(rows):,} accepted records; {len(rejected)} quarantined out of {len(raw):,} input records. See quality.json and quarantine.json for auditable reasons. Monetary values use integer cents. All rates are ratios of summed components, never averages of row rates.
+## Conversion accounting
+A conversion can be linked to many impressions. Summing the conversion flag would overcount sales. The source reuses {quality['conversion_ids_with_multiple_timestamps']:,} conversion IDs at different timestamps, so ID alone is not a sufficient event key. This project counts each credited (conversion_id, conversion_timestamp) pair once globally, allocating it to the most recent observed clicked credited impression, or the most recent credited impression if no clicked one is observed. This reporting rule does not recover an unknown platform touchpoint. CVR uses only the clicked subset; CPA uses all unique credited conversions. Filtering by day reports the allocated impression cohort with the source's observed follow-up outcomes, not conversions occurring on that calendar day.
 
-## Client discussion
-1. Confirm the business objective and target CPA/ROAS with Customer Success; no client targets are assumed here.
-2. Ask Ad Operations to review tracking, creative rotation, frequency and landing-page changes in the weaker segment.
-3. Review the first/last 30-day comparison in period_kpis.csv and the dashboard; evaluate attribution lag before calling a decline.
-4. Validate results with a controlled test and agreed success criteria before discussing expansion with Sales. Renewal or upsell is conditional on evidence and client goals.
+## Integrity
+{quality['accepted_rows']:,} accepted source rows; {quality['quarantined_rows']:,} rejected; {quality['repeated_credited_conversion_links_collapsed']:,} repeated credited conversion links collapsed. Identical source impressions are not automatically deleted because the source has no impression ID and distinct impressions can share published attributes. {quality['credited_conversion_keys_linked_to_multiple_campaigns']:,} credited conversion keys span more than one campaign and are allocated using the same explicit reporting rule. Published data contains campaign/day aggregates, not user IDs or conversion IDs.
 
-## Measurement boundary
-CVR is conversions/clicks; ROAS is attributed revenue/spend, not profit. Click-attributed conversions cannot exceed clicks in this fixture. No user-level data, attribution engine, actual DSP integration, CTV, DOOH, reach/frequency measurement or causal lift measurement is included. Cross-channel attribution comparability is an assumption of this simulation.
+## Measurement limits
+Source costs are transformed and have no documented currency; revenue is absent. ROAS is unavailable. The cpo field is a transformed cost-per-order field, not revenue. No channel, region, demographic, calendar date or synthetic performance values are invented. Data is historical, anonymized and already subsampled by Criteo; findings describe the release rather than all live traffic. No sampling weights are supplied, so observed CTR/CVR cannot be used as population or industry benchmarks.
+
+Source: {SOURCE_PAGE}
+Dataset and derived data: CC BY-NC-SA 4.0. Attribution: Diemert, Meynet, Lefortier and Galland (2017), Attribution Modeling Increases Efficiency of Bidding in Display Advertising.
 '''
     (output/'client_review.md').write_text(memo)
-    (output/'summary.json').write_text(json.dumps({'quality':quality,'channels':channels,'scenario':{'shift_dollars':shift,'illustrative_revenue_difference':scenario}},indent=2)+'\n')
     con.close()
-    print(json.dumps({'output':str(output),'quality':quality,'best_channel':best,'lowest_channel':worst},indent=2))
+    print(json.dumps({'overall':total,'quality':quality},indent=2))
 
-if __name__=='__main__':
-    parser=argparse.ArgumentParser(); parser.add_argument('--output',type=Path,default=ROOT/'docs')
-    run(parser.parse_args().output)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', type=Path, default=ROOT/'docs')
+    parser.add_argument('--from-source', type=Path, help='Verify and aggregate the full pinned gzipped TSV before rendering')
+    args = parser.parse_args()
+    if args.from_source:
+        import_source(args.from_source)
+    run(args.output)
