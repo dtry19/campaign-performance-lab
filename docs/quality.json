@@ -1,0 +1,13 @@
+{
+  "source_rows": 3249,
+  "accepted_rows": 3240,
+  "quarantined_rows": 9,
+  "reasons": {
+    "duplicate grain": 3,
+    "negative metric": 1,
+    "invalid click-attributed funnel": 2,
+    "invalid dimension": 1,
+    "Invalid isoformat string: 'invalid'": 1,
+    "invalid literal for int() with base 10: 'bad'": 1
+  }
+}

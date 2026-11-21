@@ -1,0 +1,137 @@
+[
+  {
+    "source_line": 3242,
+    "reason": "duplicate grain",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C01",
+      "channel": "Display",
+      "region": "West",
+      "impressions": 21549,
+      "clicks": 369,
+      "conversions": 13,
+      "spend_cents": 12929,
+      "revenue_cents": 118118
+    }
+  },
+  {
+    "source_line": 3243,
+    "reason": "duplicate grain",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C01",
+      "channel": "Display",
+      "region": "Central",
+      "impressions": 40209,
+      "clicks": 457,
+      "conversions": 13,
+      "spend_cents": 24125,
+      "revenue_cents": 115492
+    }
+  },
+  {
+    "source_line": 3244,
+    "reason": "duplicate grain",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C01",
+      "channel": "Display",
+      "region": "East",
+      "impressions": 23978,
+      "clicks": 198,
+      "conversions": 7,
+      "spend_cents": 14387,
+      "revenue_cents": 47705
+    }
+  },
+  {
+    "source_line": 3245,
+    "reason": "negative metric",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C04",
+      "channel": "Display",
+      "region": "Central",
+      "impressions": 35277,
+      "clicks": 279,
+      "conversions": 12,
+      "spend_cents": -10,
+      "revenue_cents": 93828
+    }
+  },
+  {
+    "source_line": 3246,
+    "reason": "invalid click-attributed funnel",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C04",
+      "channel": "Display",
+      "region": "East",
+      "impressions": 32683,
+      "clicks": 999999,
+      "conversions": 9,
+      "spend_cents": 19610,
+      "revenue_cents": 62595
+    }
+  },
+  {
+    "source_line": 3247,
+    "reason": "invalid dimension",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C05",
+      "channel": "Online Video",
+      "region": "",
+      "impressions": 28811,
+      "clicks": 294,
+      "conversions": 7,
+      "spend_cents": 28811,
+      "revenue_cents": 60123
+    }
+  },
+  {
+    "source_line": 3248,
+    "reason": "invalid click-attributed funnel",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C05",
+      "channel": "Online Video",
+      "region": "Central",
+      "impressions": 26096,
+      "clicks": 252,
+      "conversions": 999999,
+      "spend_cents": 26096,
+      "revenue_cents": 9200
+    }
+  },
+  {
+    "source_line": 3249,
+    "reason": "Invalid isoformat string: 'invalid'",
+    "record": {
+      "date": "invalid",
+      "campaign": "C05",
+      "channel": "Online Video",
+      "region": "East",
+      "impressions": 19485,
+      "clicks": 187,
+      "conversions": 5,
+      "spend_cents": 19485,
+      "revenue_cents": 39930
+    }
+  },
+  {
+    "source_line": 3250,
+    "reason": "invalid literal for int() with base 10: 'bad'",
+    "record": {
+      "date": "2026-09-01",
+      "campaign": "C06",
+      "channel": "Mobile Web",
+      "region": "West",
+      "impressions": "bad",
+      "clicks": 214,
+      "conversions": 11,
+      "spend_cents": 15053,
+      "revenue_cents": 86603
+    }
+  }
+]
